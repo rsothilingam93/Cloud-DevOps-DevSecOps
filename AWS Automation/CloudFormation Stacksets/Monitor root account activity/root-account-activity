@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ""
+Resources:
+  SnsTopic1:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      Subscription:
+        - Endpoint: "example@email.ca"
+          Protocol: "email"
+      TopicName: "sns-topic"
+  ConfigRule1:
+    Type: "AWS::Config::ConfigRule"
+    Properties:
+      ConfigRuleName: "root-account-mfa-enabled"
+      Scope:
+        ComplianceResourceTypes: []
+      Description: "A Config rule that checks whether users of your AWS account require a multi-factor authentication (MFA) device to sign in with root credentials."
+      Source:
+        Owner: "AWS"
+        SourceIdentifier: "ROOT_ACCOUNT_MFA_ENABLED"
+      MaximumExecutionFrequency: "TwentyFour_Hours"
+  ConfigRule3:
+    Type: "AWS::Config::ConfigRule"
+    Properties:
+      ConfigRuleName: "iam-root-access-key-check"
+      Scope:
+        ComplianceResourceTypes: []
+      Description: "A config rule that checks whether the root user access key is available. The rule is COMPLIANT if the user access key does not exist."
+      Source:
+        Owner: "AWS"
+        SourceIdentifier: "IAM_ROOT_ACCESS_KEY_CHECK"
+      MaximumExecutionFrequency: "TwentyFour_Hours"
+  CwEvent1:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: "detect-config-rule-compliance-changes"
+      Description: "A CloudWatch Event Rule that detects changes to AWS Config Rule compliance status and publishes change events to an SNS topic for notification."
+      State: "ENABLED"
+      Targets:
+        - Arn:
+            Ref: "SnsTopic1"
+          Id: "target-id1"
+      EventPattern:
+        detail-type:
+          - "Config Rules Compliance Change"
+        source:
+          - "aws.config"
+  SnsTopicPolicyCwEvent1:
+    Type: "AWS::SNS::TopicPolicy"
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Sid: "__default_statement_ID"
+            Effect: "Allow"
+            Principal:
+              AWS: "*"
+            Action:
+              - "SNS:GetTopicAttributes"
+              - "SNS:SetTopicAttributes"
+              - "SNS:AddPermission"
+              - "SNS:RemovePermission"
+              - "SNS:DeleteTopic"
+              - "SNS:Subscribe"
+              - "SNS:ListSubscriptionsByTopic"
+              - "SNS:Publish"
+              - "SNS:Receive"
+            Resource:
+              Ref: "SnsTopic1"
+            Condition:
+              StringEquals:
+                AWS:SourceOwner:
+                  Ref: "AWS::AccountId"
+          - Sid: "TrustCWEToPublishEventsToMyTopic"
+            Effect: "Allow"
+            Principal:
+              Service: "events.amazonaws.com"
+            Action: "sns:Publish"
+            Resource:
+              Ref: "SnsTopic1"
+      Topics:
+        - Ref: "SnsTopic1"
+  CwAlarm1:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmName: "root_account_login"
+      AlarmDescription: "A CloudWatch Alarm that triggers if a root user uses the account."
+      MetricName: "RootUserEventCount"
+      Namespace: "CloudTrailMetrics"
+      Statistic: "Sum"
+      Period: "60"
+      EvaluationPeriods: "1"
+      Threshold: "1"
+      ComparisonOperator: "GreaterThanOrEqualToThreshold"
+      AlarmActions:
+        - Ref: "SnsTopic1"
+      TreatMissingData: "notBreaching"
+  MetricFilter1:
+    Type: "AWS::Logs::MetricFilter"
+    Properties:
+      LogGroupName: "aws-cloudtrail-logs-544806602423-bc166aa8"
+      FilterPattern: "{ ($.userIdentity.type = \"Root\") && ($.userIdentity.invokedBy NOT EXISTS) && ($.eventType != \"AwsServiceEvent\") }"
+      MetricTransformations:
+        - MetricValue: "1"
+          MetricNamespace: "CloudTrailMetrics"
+          MetricName: "RootUserEventCount"
+Parameters: {}
+Metadata: {}
+Conditions: {}
