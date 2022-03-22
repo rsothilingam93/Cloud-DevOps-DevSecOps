@@ -1,0 +1,323 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Incident Response Automated Remediation for EC2 Compromised Instances
+## Written by: joseob@amazon.com
+## Description:  Creates EC2 Incident Response Isolation Workflow
+## Activities:
+## 1. Create EC2 IAM Isolation Role to place appropriately Tagged Instances in
+## 2. Creates IAM Role for Lambda Function
+## 3. Creates Lambda Function for Remediation
+## 4. Creates CloudWatch Event Rule to trigger based on EC2 Tag change
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: SecurityIsolation
+    Description: Prefix for Resources
+
+  TAGKEY:
+    Type: String
+    Default: IncidentStatus
+    Description: This tag Key will be used to match CloudWatch Events
+
+  TAGVALUE:
+    Type: String
+    Default: Contain
+    Description: The Value that must match in order to start Incident Response.
+
+  SGNAME:
+    Type: String
+    Default: security_isolate
+    Description: This will be used to assign or create a Security Group for Isolation.
+
+  SGDESCRIPTION:
+    Type: String
+    Default: Security Group Used for Incident Response Isolation
+    Description: This will be used as description for the Isolation Security Group
+
+  CWRuleName:
+    Type: String
+    Default: EC2TagChangeEvent
+    Description: Name to use on CloudWatch Event Rule to Detect EC2 Tag Changes
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Configuration Parameters
+        Parameters:
+          - ResourcePrefix
+          - SGNAME
+          - SGDESCRIPTION
+          - CWRuleName
+      - Label:
+          default: Evaluation Parameters
+        Parameters:
+          - TAGKEY
+          - TAGVALUE
+          - CWRuleName
+    ParameterLabels:
+      ResourcePrefix:
+        default: Resource Prefix to use on CloudFormation Stack
+      SGNAME:
+        default: Security Group Name for EC2 Isolation Workflow
+      SGDESCRIPTION:
+        default: Description to be applied on Security Group Resource
+      CWRuleName:
+        default: CloudWatch Event Rule Name
+      TAGKEY:
+        default: Tag KEY to Initiate Incident Response
+      TAGVALUE:
+        default: Tag VALUE to Initiate Incident Response
+
+Mappings: {}
+
+Conditions: {}
+
+Resources:
+  EC2IsolationRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName:
+        Fn::Join:
+        - '-'
+        - [!Ref ResourcePrefix, 'IAMRole']
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AWSDenyAll"
+
+  RootInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      InstanceProfileName:
+        Fn::Join:
+        - '-'
+        - [!Ref ResourcePrefix, 'InstanceProfile']
+      Path: "/"
+      Roles:
+        -
+          Ref: "EC2IsolationRole"
+
+  IAMRoleForLambdaFunction:
+    Type: AWS::IAM::Role
+    Metadata:
+        cfn_nag:
+          rules_to_suppress:
+            - id: W11
+              reason: "Resource * acceptable for this policy due to requirement to isolate any EC2 instances."
+    Properties:
+      RoleName:
+        Fn::Join:
+        - '-'
+        - [!Ref ResourcePrefix, 'LambdaRole']
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        -
+          PolicyName:
+            Fn::Join:
+            - '-'
+            - [!Ref ResourcePrefix, 'LambdaFunctionPolicy']
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:GetLogEvents
+                  - logs:StartQuery
+                  - logs:PutMetricFilter
+                Resource:
+                  - !Join
+                      - ''
+                      - -  Fn::Sub: "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/"
+                        -  !Join [ "", [ !Ref ResourcePrefix, 'Lambda', ':*' ]]
+              -
+                Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:PutMetricData
+                  - cloudwatch:PutDashboard
+                  - cloudwatch:GetDashboard
+                  - cloudwatch:EnableAlarmActions
+                Resource:
+                  - !Join
+                      - ''
+                      - -  Fn::Sub: "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule:/"
+                        -  !Ref CWRuleName
+              -
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:CreateSecurityGroup
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeIamInstanceProfileAssociations
+                  - ec2:AssociateIamInstanceProfile
+                  - ec2:DisassociateIamInstanceProfile
+                Resource: '*'
+              -
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:  !GetAtt
+                  - EC2IsolationRole
+                  - Arn
+
+
+
+
+
+ # Lambda Function for Notification
+  IsolationLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName:
+        Fn::Join:
+        - '-'
+        - [!Ref ResourcePrefix, 'Lambda']
+      Handler: "index.lambda_handler" # <python_file_name>.<Function_Name>
+      Environment:
+        Variables:
+          TAG_KEY: !Ref TAGKEY
+          TAG_VALUE: !Ref TAGVALUE
+          SG_NAME: !Ref SGNAME
+          SG_DESCRIPTION: !Ref SGDESCRIPTION
+          EC2IsolationRoleOutput: !GetAtt
+            - RootInstanceProfile
+            - Arn
+      Role:
+        Fn::GetAtt:
+          - "IAMRoleForLambdaFunction"
+          - "Arn"
+      Code:
+        ZipFile: |
+            # coding=utf-8
+            import boto3
+            import os
+
+            ec2Client = boto3.client('ec2')
+
+            def identifyInstanceVpcId(instanceId):
+                instanceReservations = ec2Client.describe_instances(InstanceIds=[instanceId])['Reservations']
+                for instanceReservation in instanceReservations:
+                    instancesDescription = instanceReservation['Instances']
+                    for instance in instancesDescription:
+                        return instance['VpcId']
+
+            def modifyInstanceAttribute(instanceId,securityGroupId):
+                response = ec2Client.modify_instance_attribute(
+                    Groups=[securityGroupId],
+                    InstanceId=instanceId)
+
+            def createSecurityGroup(groupName, descriptionString, vpcId):
+                resource = boto3.resource('ec2')
+                securityGroupId = resource.create_security_group(GroupName=groupName, Description=descriptionString, VpcId=vpcId)
+                securityGroupId.revoke_egress(IpPermissions= [{'IpProtocol': '-1','IpRanges': [{'CidrIp': '0.0.0.0/0'}],'Ipv6Ranges': [],'PrefixListIds': [],'UserIdGroupPairs': []}])
+                return securityGroupId.id
+
+            def lambda_handler(event, context):
+                tags = event['detail']['tags']
+                tagKey = os.environ['TAG_KEY']
+                tagValue = os.environ['TAG_VALUE']
+                securityGroupName = os.environ['SG_NAME']
+                securityGroupDescription = os.environ['SG_DESCRIPTION']
+                EC2IsolationRoleOutput = os.environ['EC2IsolationRoleOutput']
+                instanceId = event['resources'][0].split("/")[1]
+                changedKeys = event['detail']['changed-tag-keys']
+                if tagKey in changedKeys:
+                    for key in tags:
+                        if key == tagKey:
+                            if tags[key] == tagValue:
+                                IamInstanceProfileAssociations = ec2Client.describe_iam_instance_profile_associations(Filters=[{'Name': 'instance-id','Values': [instanceId]}])['IamInstanceProfileAssociations']
+                                if len(IamInstanceProfileAssociations) > 0:
+                                    for associatedIamRole in IamInstanceProfileAssociations:
+                                        AssociationId = associatedIamRole['AssociationId']
+                                        IamInstanceProfileArn = associatedIamRole['IamInstanceProfile']['Arn']
+                                        print("Current IAM Instance Profile:", IamInstanceProfileArn)
+                                        ec2Client.disassociate_iam_instance_profile(AssociationId=AssociationId)
+                                        print("Disassociated IAM Role from", instanceId)
+
+                                ec2Client.associate_iam_instance_profile(IamInstanceProfile={'Arn': EC2IsolationRoleOutput},InstanceId=instanceId)
+
+                                vpcId = identifyInstanceVpcId(instanceId)
+                                try:
+                                    securityGroupsInVpc = ec2Client.describe_security_groups(Filters=[{'Name': 'vpc-id','Values': [vpcId]}, {'Name': 'group-name','Values': [securityGroupName]}])['SecurityGroups']
+                                    if securityGroupsInVpc:
+                                        securityGroupId = securityGroupsInVpc[0]['GroupId']
+                                    else:
+                                        securityGroupId = createSecurityGroup(securityGroupName, securityGroupDescription, vpcId)
+                                    print(f'Modifying Instance {instanceId} with Incident Response Isolation Security Group: {securityGroupId}')
+                                    modifyInstanceAttribute(instanceId,securityGroupId)
+                                except Exception as e:
+                                    raise e
+                            else:
+                                print("Incident Tag for Resource", instanceId, "reads:", tags[key], " Automation will not be triggered since Key Value does not match (Case-Sensitive)")
+
+      Runtime: "python3.7"
+      Timeout: 35
+
+
+  # Create CloudWatch Event Rule to trigger Lambda for Remediation.
+  EC2TagChangeEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref CWRuleName
+      Description: "CloudWatch Event Rule to trigger Lambda"
+      EventPattern:
+        source:
+          - "aws.tag"
+        detail:
+          service:
+            - ec2
+          resource-type:
+            - instance
+      State: "ENABLED"
+      Targets:
+        -
+          Arn: !GetAtt
+            - IsolationLambdaFunction
+            - Arn
+          Id: "EC2TagChangeEvent-Lambda-Trigger"
+
+  IsolationLambdaFunctionInvokePermissions:
+    DependsOn:
+      - IsolationLambdaFunction
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !Ref "IsolationLambdaFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+
+Outputs:
+  IsolationLambdaFunction:
+    Value: !GetAtt IsolationLambdaFunction.Arn
+  EC2IsolationRole:
+    Value: !GetAtt RootInstanceProfile.Arn
